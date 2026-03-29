@@ -16,6 +16,7 @@
 - 텔레그램 봇은 비대화형 서버 프로세스이므로 `codex exec` 계열이 가장 다루기 쉽습니다.
 - `thread.started` 이벤트에서 `thread_id` 를 추출해 `chat_id -> session label -> thread_id` 로 저장합니다.
 - 같은 리포에서 여러 세션이 동시에 수정할 수 있으므로, `/new` 와 `/attach` 는 Git repo 경로일 때 관리형 `git worktree`를 자동으로 만듭니다.
+- 시작 시 `WORKTREE_ROOT` 아래 관리형 worktree를 스캔해서, state에 등록되지 않은 고아 worktree는 자동 정리합니다.
 - `codex fork` 는 현재 CLI에서 JSON 자동화 표면이 없어 1차 버전에서는 제외했습니다.
 
 ## 기능
@@ -67,6 +68,13 @@ cd /home/ginis/codex-telegram-bot
 npm start
 ```
 
+테스트는 아래처럼 실행합니다.
+
+```bash
+cd /home/ginis/codex-telegram-bot
+npm test
+```
+
 ## systemd 등록
 
 상시 운영할 때는 user-level systemd 서비스로 두는 편이 가장 단순합니다.
@@ -115,11 +123,12 @@ loginctl enable-linger "$USER"
 ## 환경 변수
 
 - `TELEGRAM_BOT_TOKEN`: 필수
-- `ALLOWED_CHAT_IDS`: 쉼표 구분 허용 chat id 목록
+- `ALLOWED_CHAT_IDS`: 쉼표 구분 허용 chat id 목록. 최초 `/whoami` 확인 전에는 잠시 비워둘 수 있음
 - `DEFAULT_CWD`: 새 세션 기본 작업 디렉터리
 - `STATE_PATH`: 상태 JSON 저장 위치
 - `CODEX_SESSIONS_ROOT`: 기존 Codex 세션 검색 루트
 - `WORKTREE_ROOT`: 관리형 `git worktree` 생성 루트
+- `RECENT_CACHE_TTL_MS`: `/recent`와 세션 메타 조회 캐시 TTL
 - `POLL_TIMEOUT_SECONDS`: Telegram long polling 타임아웃
 - `CODEX_MODEL`: 지정하면 `codex -m ...` 로 실행
 - `CODEX_FULL_AUTO`: `1` 이면 `--full-auto` 사용
@@ -155,6 +164,7 @@ loginctl enable-linger "$USER"
 
 - 같은 세션에 동시에 여러 메시지를 넣지 않도록 `running` 상태를 둡니다.
 - 여러 세션이 같은 리포를 수정한다면 세션별 `git worktree` 분리가 사실상 필수라서, `/new` 는 Git repo 경로일 때 기본으로 관리형 worktree를 생성합니다.
+- 시작 시 고아 worktree 정리를 수행하므로, 크래시로 state에 못 올라간 worktree가 남아도 다음 부팅에서 정리됩니다.
 - 회사용 봇과 집용 봇은 토큰과 상태 파일을 완전히 분리하는 편이 안전합니다.
 - 회사용/집용을 나눌 때는 서비스 파일을 복사해 이름만 `codex-telegram-bot-work.service`, `codex-telegram-bot-home.service`처럼 분리하고 `.env` 경로도 각각 별도로 두는 편이 안전합니다.
 - `/recent` 는 `~/.codex/sessions` 아래 JSONL의 `session_meta.payload.cwd` 를 읽어와서 번호와 함께 `session_id + cwd`를 보여줍니다.
@@ -164,3 +174,4 @@ loginctl enable-linger "$USER"
 - `/close` 는 봇 연결만 닫고 원본 Codex 세션과 worktree는 남겨둡니다.
 - `/drop` 은 봇 연결을 지우고 관리형 worktree도 함께 제거하지만, 원본 Codex 세션 기록은 삭제하지 않습니다.
 - `/drop` 은 `git worktree remove --force` 를 사용하므로, 아직 커밋하지 않은 변경도 삭제될 수 있습니다.
+- `/recent` 와 세션 메타 조회는 TTL 캐시를 사용해 `~/.codex/sessions` 전체 스캔 비용을 줄입니다.

@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Telegram bot that routes messages into multiple Codex CLI sessions on one PC.",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test ./test/**/*.test.js"
   },
   "engines": {
     "node": ">=20"
