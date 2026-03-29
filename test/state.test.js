@@ -53,6 +53,8 @@ test("normalizeState backfills chat and session defaults", () => {
   assert.equal(normalized.lastUpdateId, 0);
   assert.equal(normalized.chats["50492701"].defaultCwd, "/home/ginis/default");
   assert.equal(normalized.chats["50492701"].activeSessionKey, null);
+  assert.equal(normalized.chats["50492701"].pendingInput, null);
+  assert.deepEqual(normalized.chats["50492701"].newSessionChoices, []);
   assert.deepEqual(normalized.chats["50492701"].recentSessionChoices, []);
 
   const session = normalized.chats["50492701"].sessions.bugfix;

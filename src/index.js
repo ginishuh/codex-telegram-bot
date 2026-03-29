@@ -7,6 +7,7 @@ import readline from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   sanitizeSegment,
+  compactCwdLabel,
   splitLabel,
 } from "./lib/utils.js";
 import { loadStateFile, writeJsonAtomic } from "./lib/state.js";
@@ -15,6 +16,8 @@ import { UserVisibleError, logError, toUserMessage } from "./errors.js";
 import {
   buildBackToMenuKeyboard,
   buildMainMenuKeyboard,
+  buildNewSessionKeyboard,
+  buildNewSessionPendingKeyboard,
   buildRecentMenuKeyboard,
   buildRecentSessionAfterAttachKeyboard,
   buildRecentSessionDetailKeyboard,
@@ -24,6 +27,8 @@ import {
   buildSessionMenuKeyboard,
   buildTelegramCommands,
   findAttachedSessionByThreadId,
+  formatNewSessionMenuText,
+  formatNewSessionPendingText,
   formatRecentMenuText,
   formatRecentSessions,
   formatSessionMenuText,
@@ -40,6 +45,7 @@ import {
   createRecentSessionStore,
   provisionSessionWorkspace,
   removeManagedWorktree,
+  resolveRepoRoot,
 } from "./git.js";
 
 loadDotEnv(path.resolve(process.cwd(), ".env"));
@@ -131,6 +137,11 @@ async function handleUpdate(update) {
 
   if (text.startsWith("/")) {
     await handleCommand(chatId, chat, message, text);
+    return;
+  }
+
+  if (chat.pendingInput?.type === "new_session") {
+    await handlePendingNewSessionInput(chatId, chat, text);
     return;
   }
 
@@ -312,50 +323,13 @@ async function handleCommand(chatId, chat, message, text) {
         await sendText(chatId, "사용법: `/new 세션명 [cwd]`");
         return;
       }
-      if (chat.sessions[label]) {
-        await sendText(chatId, `세션 \`${label}\` 이 이미 있습니다.`);
-        return;
-      }
-
       const requestedCwd = path.resolve(remainder || chat.defaultCwd || DEFAULT_CWD);
-      let workspace;
       try {
-        workspace = await provisionSessionWorkspace(
-          chatId,
-          label,
-          requestedCwd,
-          WORKTREE_ROOT,
-        );
+        const created = await createSession(chatId, chat, label, requestedCwd);
+        await sendText(chatId, created);
       } catch (error) {
-        logError(`new:${label}`, error);
         await sendText(chatId, toUserMessage(error, `세션 \`${label}\` 생성에 실패했습니다.`));
-        return;
       }
-      await mutateState(() => {
-        chat.sessions[label] = {
-          threadId: null,
-          cwd: workspace.cwd,
-          worktree: workspace.worktree,
-          lifecycle: "open",
-          runState: "idle",
-          createdAt: now(),
-          updatedAt: now(),
-          lastAssistantMessage: "",
-          lastUserMessage: "",
-        };
-        chat.activeSessionKey = label;
-      });
-      const lines = [
-        `세션 \`${label}\` 을 만들었습니다.`,
-        `- cwd: \`${workspace.cwd}\``,
-      ];
-      if (workspace.worktree) {
-        lines.push(`- repo: \`${workspace.worktree.repoRoot}\``);
-        lines.push(`- worktree: \`${workspace.worktree.path}\``);
-        lines.push(`- branch: \`${workspace.worktree.branch}\``);
-      }
-      lines.push("- 첫 일반 메시지가 오면 그때 실제 Codex 세션을 생성합니다.");
-      await sendText(chatId, lines.join("\n"));
       return;
     }
     case "/use": {
@@ -447,6 +421,23 @@ async function handleCallbackQuery(query) {
       await answerCallback(query.id);
       return;
     }
+    if (data === "menu:new") {
+      const options = await listNewSessionOptions(chat);
+      await mutateState(() => {
+        chat.newSessionChoices = options.map((option) => ({
+          index: option.index,
+          source: option.source,
+          cwd: option.cwd,
+        }));
+      });
+      await updateMenuMessage(
+        query,
+        formatNewSessionMenuText(chat, options),
+        buildNewSessionKeyboard(options),
+      );
+      await answerCallback(query.id);
+      return;
+    }
     if (data === "menu:status") {
       await updateMenuMessage(
         query,
@@ -466,6 +457,17 @@ async function handleCallbackQuery(query) {
       const page = Number.parseInt(data.split(":")[2] ?? "0", 10) || 0;
       await showRecentMenu(query, chat, page);
       await answerCallback(query.id);
+      return;
+    }
+    if (data.startsWith("new:prepare:")) {
+      const [, , sourceType, ...restParts] = data.split(":");
+      const prepared = await prepareNewSessionInput(chatId, chat, sourceType ?? "", restParts.join(":"));
+      await updateMenuMessage(
+        query,
+        formatNewSessionPendingText(prepared.mode, prepared.cwd, prepared.label),
+        buildNewSessionPendingKeyboard(),
+      );
+      await answerCallback(query.id, "세션 이름 입력을 기다립니다.");
       return;
     }
     if (data.startsWith("recent:page:")) {
@@ -549,6 +551,177 @@ async function handleCallbackQuery(query) {
     logError("callback", error);
     await answerCallback(query.id, toUserMessage(error, "요청 처리 중 오류가 발생했습니다."), true);
   }
+}
+
+async function createSession(chatId, chat, label, requestedCwd) {
+  if (chat.sessions[label]) {
+    throw new UserVisibleError(`세션 \`${label}\` 이 이미 있습니다.`);
+  }
+
+  let workspace;
+  try {
+    workspace = await provisionSessionWorkspace(
+      chatId,
+      label,
+      requestedCwd,
+      WORKTREE_ROOT,
+    );
+  } catch (error) {
+    logError(`new:${label}`, error);
+    throw new UserVisibleError(`세션 \`${label}\` 생성에 실패했습니다.\n\n서비스 로그를 확인해주세요.`);
+  }
+
+  await mutateState(() => {
+    chat.sessions[label] = {
+      threadId: null,
+      cwd: workspace.cwd,
+      worktree: workspace.worktree,
+      lifecycle: "open",
+      runState: "idle",
+      createdAt: now(),
+      updatedAt: now(),
+      lastAssistantMessage: "",
+      lastUserMessage: "",
+    };
+    chat.activeSessionKey = label;
+    chat.pendingInput = null;
+  });
+
+  const lines = [
+    `세션 \`${label}\` 을 만들었습니다.`,
+    `- cwd: \`${workspace.cwd}\``,
+  ];
+  if (workspace.worktree) {
+    lines.push(`- repo: \`${workspace.worktree.repoRoot}\``);
+    lines.push(`- worktree: \`${workspace.worktree.path}\``);
+    lines.push(`- branch: \`${workspace.worktree.branch}\``);
+  }
+  lines.push("- 첫 일반 메시지가 오면 그때 실제 Codex 세션을 생성합니다.");
+  return lines.join("\n");
+}
+
+async function listNewSessionOptions(chat) {
+  const options = [
+    {
+      source: "기본 리포",
+      cwd: path.resolve(chat.defaultCwd || DEFAULT_CWD),
+    },
+  ];
+
+  const seen = new Set([path.resolve(chat.defaultCwd || DEFAULT_CWD)]);
+  const labels = Object.keys(chat.sessions).sort((left, right) => {
+    if (left === chat.activeSessionKey) {
+      return -1;
+    }
+    if (right === chat.activeSessionKey) {
+      return 1;
+    }
+    return left.localeCompare(right);
+  });
+
+  for (const label of labels) {
+    const session = chat.sessions[label];
+    const repoPath = path.resolve(session.worktree?.repoRoot ?? session.cwd);
+    if (seen.has(repoPath)) {
+      continue;
+    }
+    seen.add(repoPath);
+    options.push({
+      source: label === chat.activeSessionKey ? "현재 세션 리포" : `세션 ${label} 리포`,
+      cwd: repoPath,
+    });
+  }
+
+  const recentEntries = await recentSessionStore.listRecentSessions(12);
+  for (const entry of recentEntries) {
+    if (!entry.cwd) {
+      continue;
+    }
+    const repoPath = await resolveRepoRoot(path.resolve(entry.cwd));
+    if (seen.has(repoPath)) {
+      continue;
+    }
+    seen.add(repoPath);
+    options.push({
+      source: "최근 Codex 리포",
+      cwd: repoPath,
+    });
+    if (options.length >= 8) {
+      break;
+    }
+  }
+
+  return options.map((option, index) => ({
+    ...option,
+    index: index + 1,
+  }));
+}
+
+async function prepareNewSessionInput(chatId, chat, mode, value = "") {
+  let nextPendingInput;
+
+  if (mode === "repo") {
+    const index = Number.parseInt(value, 10);
+    const choice = chat.newSessionChoices?.find((entry) => entry.index === index);
+    if (!choice) {
+      throw new UserVisibleError("선택한 리포를 찾지 못했습니다.");
+    }
+    nextPendingInput = {
+      type: "new_session",
+      mode,
+      label: choice.source,
+      cwd: choice.cwd,
+    };
+  } else if (mode === "custom") {
+    nextPendingInput = {
+      type: "new_session",
+      mode,
+      label: "직접 입력",
+      cwd: null,
+    };
+  } else {
+    throw new UserVisibleError("알 수 없는 새 세션 시작 방식입니다.");
+  }
+
+  await mutateState(() => {
+    const latestChat = ensureChat(chatId);
+    latestChat.pendingInput = nextPendingInput;
+  });
+
+  return nextPendingInput;
+}
+
+async function handlePendingNewSessionInput(chatId, chat, text) {
+  const pendingInput = chat.pendingInput;
+  if (!pendingInput || pendingInput.type !== "new_session") {
+    return false;
+  }
+
+  const { label, remainder } = splitLabel(text);
+  if (!label) {
+    await sendText(chatId, "세션 이름이 필요합니다. 예: `bugfix-auth`");
+    return true;
+  }
+
+  let requestedCwd;
+  if (pendingInput.mode === "custom") {
+    if (!remainder) {
+      await sendText(chatId, "`세션명 /absolute/path` 형식으로 다시 보내주세요.");
+      return true;
+    }
+    requestedCwd = path.resolve(remainder);
+  } else {
+    requestedCwd = path.resolve(pendingInput.cwd || chat.defaultCwd || DEFAULT_CWD);
+  }
+
+  try {
+    const created = await createSession(chatId, chat, label, requestedCwd);
+    await sendText(chatId, created);
+  } catch (error) {
+    await sendText(chatId, toUserMessage(error, `세션 \`${label}\` 생성에 실패했습니다.`));
+  }
+
+  return true;
 }
 
 async function processSessionPrompt(chatId, label, prompt) {
@@ -922,6 +1095,8 @@ function ensureChat(chatId) {
     state.chats[chatId] = {
       defaultCwd: DEFAULT_CWD,
       activeSessionKey: null,
+      pendingInput: null,
+      newSessionChoices: [],
       recentSessionChoices: [],
       sessions: {},
     };

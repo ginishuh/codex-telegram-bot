@@ -24,6 +24,8 @@ export function normalizeState(value, defaultCwd) {
   for (const chat of Object.values(parsed.chats)) {
     chat.defaultCwd ??= defaultCwd;
     chat.activeSessionKey ??= null;
+    chat.pendingInput ??= null;
+    chat.newSessionChoices ??= [];
     chat.recentSessionChoices ??= [];
     chat.sessions ??= {};
     for (const session of Object.values(chat.sessions)) {

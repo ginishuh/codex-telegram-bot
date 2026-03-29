@@ -142,6 +142,11 @@ export async function removeManagedWorktree(worktree) {
   ]);
 }
 
+export async function resolveRepoRoot(targetCwd) {
+  const gitContext = await detectGitContext(targetCwd);
+  return gitContext?.repoRoot ?? path.resolve(targetCwd);
+}
+
 export async function collectManagedWorktreePaths(rootDir) {
   const directories = [];
 

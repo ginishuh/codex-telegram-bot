@@ -58,6 +58,7 @@ export function menuHomeText() {
   return [
     "Codex Telegram Bot 메뉴",
     "",
+    "- 새 세션 만들기",
     "- 최근 세션 불러오기",
     "- 붙인 세션 관리",
     "- 현재 활성 세션 확인",
@@ -221,11 +222,14 @@ export function buildMainMenuKeyboard() {
   return {
     inline_keyboard: [
       [
+        { text: "새 세션", callback_data: "menu:new" },
         { text: "최근 세션", callback_data: "menu:recent:0" },
-        { text: "붙인 세션", callback_data: "menu:sessions:0" },
       ],
       [
+        { text: "붙인 세션", callback_data: "menu:sessions:0" },
         { text: "현재 세션", callback_data: "menu:status" },
+      ],
+      [
         { text: "도움말", callback_data: "menu:help" },
       ],
     ],
@@ -348,4 +352,60 @@ export function buildSessionAfterActionKeyboard(page) {
       ],
     ],
   };
+}
+
+export function formatNewSessionMenuText(chat, options) {
+  return [
+    "리포 선택",
+    "",
+    `기본 리포: ${chat.defaultCwd}`,
+    "",
+    ...options.map((option, index) => `${index + 1}. ${option.source} · ${compactCwdLabel(option.cwd)}`),
+    "",
+    "기본 리포, 붙은 세션 리포, 최근 Codex 리포를 버튼으로 보여줍니다.",
+    "버튼으로 시작 리포를 고른 뒤 세션 이름을 보내세요.",
+    "직접 입력을 고르면 `세션명 /absolute/path` 형식으로 보내면 됩니다.",
+  ].join("\n");
+}
+
+export function buildNewSessionKeyboard(options) {
+  const rows = options.map((option) => [
+    {
+      text: `${option.source} · ${compactCwdLabel(option.cwd)}`,
+      callback_data: `new:prepare:repo:${option.index}`,
+    },
+  ]);
+
+  rows.push([{ text: "직접 리포 경로 입력", callback_data: "new:prepare:custom" }]);
+  rows.push([{ text: "메인 메뉴", callback_data: "menu:home" }]);
+  return { inline_keyboard: rows };
+}
+
+export function buildNewSessionPendingKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "새 세션 메뉴로", callback_data: "menu:new" }],
+      [{ text: "메인 메뉴", callback_data: "menu:home" }],
+    ],
+  };
+}
+
+export function formatNewSessionPendingText(mode, cwd, label = "직접 입력") {
+  if (mode === "custom") {
+    return [
+      "새 세션 입력 대기",
+      "",
+      "`세션명 /absolute/path` 형식으로 메시지를 보내세요.",
+      "예: `bugfix /home/ginis/sogecon-app`",
+    ].join("\n");
+  }
+
+  return [
+    "새 세션 입력 대기",
+    "",
+    `선택: ${label}`,
+    `시작 리포: ${cwd}`,
+    "이제 세션 이름만 보내세요.",
+    "예: `bugfix-auth`",
+  ].join("\n");
 }
