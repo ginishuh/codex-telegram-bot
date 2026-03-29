@@ -1,0 +1,19 @@
+[Unit]
+Description=Codex Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ginis/codex-telegram-bot
+EnvironmentFile=/home/ginis/codex-telegram-bot/.env
+ExecStart=/usr/bin/env node /home/ginis/codex-telegram-bot/src/index.js
+Restart=always
+RestartSec=5
+
+# Keep logs in journald for `journalctl --user -u codex-telegram-bot`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
