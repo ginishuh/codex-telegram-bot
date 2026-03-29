@@ -1,6 +1,46 @@
+import http from "node:http";
+import https from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { splitTelegramText } from "./lib/utils.js";
+
+async function postJson(requestUrl, payload) {
+  const url = new URL(requestUrl);
+  const transport = url.protocol === "https:" ? https : http;
+  const body = JSON.stringify(payload);
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        },
+        family: url.protocol === "https:" ? 4 : undefined,
+      },
+      (response) => {
+        let raw = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          raw += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
 
 export function createTelegramClient(apiBaseUrl) {
   async function telegram(method, payload) {
@@ -8,12 +48,7 @@ export function createTelegramClient(apiBaseUrl) {
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        const response = await fetch(`${apiBaseUrl}/${method}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const body = await response.json();
+        const body = await postJson(`${apiBaseUrl}/${method}`, payload);
         if (!body.ok) {
           throw new Error(`${method} failed: ${JSON.stringify(body)}`);
         }
