@@ -4,6 +4,14 @@ import {
   shortThreadId,
 } from "./lib/utils.js";
 
+function escapeTelegramMarkdown(text) {
+  return String(text).replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, "\\$1");
+}
+
+function code(value) {
+  return `\`${escapeTelegramMarkdown(value)}\``;
+}
+
 function inlineText(value) {
   if (!value) {
     return "없음";
@@ -33,24 +41,31 @@ export function helpText() {
   return [
     "Codex Telegram Bot",
     "",
-    "/menu : 버튼 메뉴 열기",
-    "/new 세션명 [cwd] : 새 세션 생성, Git repo면 전용 worktree 자동 생성",
-    "/attach 세션명 session_id|recent번호 [cwd] : 기존 Codex 세션 붙이기",
+    "Codex Core",
+    "/new 세션명 [cwd] : 새 thread 시작, Git repo면 전용 worktree 자동 생성",
+    "/thread : 현재 thread 상태 보기",
+    "/threads : 열린 세션 목록 보기",
+    "/status : 현재 활성 세션 요약 보기",
+    "/cancel [세션명] : 현재 turn 취소",
+    "/cwd : 현재 cwd, thread_id, branch 확인",
     "/use 세션명 : 활성 세션 전환",
-    "/sessions : 세션 목록 보기",
+    "/resume 세션명 : 닫힌 세션 다시 열기",
+    "",
+    "Telegram Extras",
+    "/menu : 버튼 메뉴 열기",
+    "/attach 세션명 session_id|recent번호 [cwd] : 기존 Codex 세션 붙이기",
     "/recent [개수] : 최근 Codex 세션과 cwd 보기",
-    "/status : 활성 세션 요약 보기",
-    "/cancel [세션명] : 실행 중인 작업 취소",
     "/whoami : 현재 chat_id 와 사용자 정보 보기",
     "/close [세션명] : 봇 연결 닫기",
     "/drop [세션명] : 봇 연결 삭제, 관리형 worktree도 함께 제거",
-    "/reopen 세션명 : 닫힌 세션 다시 열기",
     "/setcwd /absolute/path : 기본 cwd 저장",
-    "/where : 활성 세션의 cwd와 thread_id 확인",
+    "/where : /cwd 와 동일한 상세 정보",
+    "/sessions : /threads 와 동일한 세션 목록",
+    "/reopen 세션명 : /resume 과 동일",
     "",
-    "일반 메시지는 현재 활성 세션으로 codex exec 또는 codex exec resume 됩니다.",
+    "일반 메시지는 현재 활성 thread로 이어서 작업합니다.",
     "",
-    "참고: codex fork 는 현재 CLI에서 JSON 자동화 표면이 없어 1차 버전에서는 넣지 않았습니다.",
+    "참고: codex fork 는 현재 CLI에서 JSON 자동화 표면이 없어 아직 넣지 않았습니다.",
   ].join("\n");
 }
 
@@ -71,11 +86,11 @@ export function menuHomeText() {
 export function buildTelegramCommands() {
   return [
     { command: "menu", description: "버튼 메뉴 열기" },
+    { command: "thread", description: "현재 thread 상태 보기" },
+    { command: "threads", description: "열린 세션 목록 보기" },
+    { command: "cwd", description: "현재 cwd와 thread 확인" },
+    { command: "new", description: "새 thread 시작" },
     { command: "whoami", description: "현재 chat_id 확인" },
-    { command: "recent", description: "최근 Codex 세션 보기" },
-    { command: "sessions", description: "세션 목록 보기" },
-    { command: "status", description: "현재 세션 상태 보기" },
-    { command: "new", description: "새 세션 만들기" },
   ];
 }
 
@@ -214,8 +229,76 @@ export function formatRecentMenuText(entries, page) {
   return lines.join("\n");
 }
 
-export function renderReply(label, text, threadId) {
-  return [`[${label}]`, "", text, "", `thread_id: ${threadId}`].join("\n");
+function formatUsage(usage) {
+  if (!usage) {
+    return null;
+  }
+
+  const formatTokenCount = (value) => {
+    if (value < 1000) {
+      return String(value);
+    }
+
+    const compact = (value / 1000).toFixed(value >= 10000 ? 0 : 1);
+    return `${compact.replace(/\.0$/, "")}k`;
+  };
+
+  const parts = [`in ${formatTokenCount(usage.input_tokens)}`];
+  if (usage.cached_input_tokens) {
+    parts.push(`cached ${formatTokenCount(usage.cached_input_tokens)}`);
+  }
+  parts.push(`out ${formatTokenCount(usage.output_tokens)}`);
+  return parts.join(" | ");
+}
+
+export function renderReply(label, text, threadId, { branch = "", usage = null } = {}) {
+  const body = escapeTelegramMarkdown(text);
+  const footer = [`*thread* ${code(threadId)}`];
+
+  if (branch) {
+    footer.push(`*branch* ${code(branch)}`);
+  }
+
+  const usageText = formatUsage(usage);
+  if (usageText) {
+    footer.push(`*usage* ${escapeTelegramMarkdown(usageText)}`);
+  }
+
+  return [
+    `*\\[${escapeTelegramMarkdown(label)}\\] 결과*`,
+    "",
+    body,
+    "",
+    footer.join("\n"),
+  ].join("\n");
+}
+
+export function renderProgress(label, { threadId = "", statusText = "실행 중", steps = [] } = {}) {
+  const recentSteps = steps.slice(-4);
+  const lines = [`*\\[${escapeTelegramMarkdown(label)}\\] 진행 상황*`, ""];
+
+  lines.push(`*상태* ${escapeTelegramMarkdown(statusText)}`);
+
+  if (threadId) {
+    lines.push(`*thread* ${code(threadId)}`);
+  }
+
+  if (recentSteps.length > 0) {
+    lines.push("");
+    for (const [index, step] of recentSteps.entries()) {
+      lines.push(`${index + 1}\\. ${escapeTelegramMarkdown(step)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function renderError(label, message) {
+  return [
+    `*\\[${escapeTelegramMarkdown(label)}\\] 오류*`,
+    "",
+    escapeTelegramMarkdown(message),
+  ].join("\n");
 }
 
 export function buildMainMenuKeyboard() {

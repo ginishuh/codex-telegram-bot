@@ -1,6 +1,51 @@
+import http from "node:http";
+import https from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { splitTelegramText } from "./lib/utils.js";
+
+const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
+
+async function postJson(requestUrl, payload) {
+  const url = new URL(requestUrl);
+  const transport = url.protocol === "https:" ? https : http;
+  const body = JSON.stringify(payload);
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(body),
+        },
+        family: 4,
+      },
+      (response) => {
+        let raw = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          raw += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+
+    request.setTimeout(TELEGRAM_REQUEST_TIMEOUT_MS, () => {
+      request.destroy(new Error(`telegram request timed out after ${TELEGRAM_REQUEST_TIMEOUT_MS}ms`));
+    });
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
 
 export function createTelegramClient(apiBaseUrl) {
   async function telegram(method, payload) {
@@ -8,12 +53,7 @@ export function createTelegramClient(apiBaseUrl) {
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        const response = await fetch(`${apiBaseUrl}/${method}`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const body = await response.json();
+        const body = await postJson(`${apiBaseUrl}/${method}`, payload);
         if (!body.ok) {
           throw new Error(`${method} failed: ${JSON.stringify(body)}`);
         }
@@ -40,14 +80,16 @@ export function createTelegramClient(apiBaseUrl) {
 
   async function sendText(chatId, text, extra = {}) {
     const chunks = splitTelegramText(text);
+    let lastResult = null;
     for (const [index, chunk] of chunks.entries()) {
-      await telegram("sendMessage", {
+      lastResult = await telegram("sendMessage", {
         chat_id: Number(chatId),
         text: chunk,
         disable_web_page_preview: true,
         ...(index === chunks.length - 1 ? extra : {}),
       });
     }
+    return lastResult;
   }
 
   async function editText(chatId, messageId, text, extra = {}) {

@@ -1,9 +1,6 @@
-import fs from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
-import readline from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   sanitizeSegment,
@@ -11,7 +8,6 @@ import {
   splitLabel,
 } from "./lib/utils.js";
 import { loadStateFile, writeJsonAtomic } from "./lib/state.js";
-import { buildCodexChildEnv } from "./child-env.js";
 import { UserVisibleError, logError, toUserMessage } from "./errors.js";
 import {
   buildBackToMenuKeyboard,
@@ -37,6 +33,8 @@ import {
   formatWhoAmI,
   helpText,
   menuHomeText,
+  renderError,
+  renderProgress,
   renderReply,
 } from "./menu.js";
 import { createTelegramClient } from "./telegram.js";
@@ -47,6 +45,7 @@ import {
   removeManagedWorktree,
   resolveRepoRoot,
 } from "./git.js";
+import { runCodexSdkTurn } from "./codex-sdk.js";
 
 loadDotEnv(path.resolve(process.cwd(), ".env"));
 
@@ -79,6 +78,13 @@ const recentSessionStore = createRecentSessionStore(CODEX_SESSIONS_ROOT, RECENT_
 
 const state = await loadStateFile(STATE_PATH, DEFAULT_CWD);
 const backgroundJobs = new Set();
+
+class SessionCanceledError extends Error {
+  constructor() {
+    super("session canceled");
+    this.name = "SessionCanceledError";
+  }
+}
 
 console.log(`[boot] state=${STATE_PATH}`);
 console.log(`[boot] default cwd=${DEFAULT_CWD}`);
@@ -181,9 +187,17 @@ async function handleUpdate(update) {
     latestSession.updatedAt = now();
     latestSession.lastUserMessage = text;
   });
-  await sendText(chatId, `세션 \`${activeLabel}\` 작업을 시작합니다.`);
+  const progressMessage = await sendText(
+    chatId,
+    renderProgress(activeLabel, {
+      threadId: session.threadId,
+      statusText: "시작됨",
+      steps: ["요청 전달 완료", "Codex 준비 중"],
+    }),
+    { parse_mode: "MarkdownV2" },
+  );
 
-  const job = processSessionPrompt(chatId, activeLabel, text).finally(
+  const job = processSessionPrompt(chatId, activeLabel, text, progressMessage?.message_id ?? null).finally(
     () => backgroundJobs.delete(job),
   );
   backgroundJobs.add(job);
@@ -202,6 +216,7 @@ async function handleCommand(chatId, chat, message, text) {
     case "/help":
       await sendText(chatId, helpText());
       return;
+    case "/threads":
     case "/sessions":
       await sendText(chatId, formatSessions(chat));
       return;
@@ -220,6 +235,7 @@ async function handleCommand(chatId, chat, message, text) {
       await sendText(chatId, formatRecentSessions(recentSessions, limit, CODEX_SESSIONS_ROOT));
       return;
     }
+    case "/thread":
     case "/status":
       await sendText(chatId, formatStatus(chat, chat.activeSessionKey));
       return;
@@ -354,10 +370,11 @@ async function handleCommand(chatId, chat, message, text) {
       await sendText(chatId, message);
       return;
     }
+    case "/resume":
     case "/reopen": {
       const label = parts[0];
       if (!label || !chat.sessions[label]) {
-        await sendText(chatId, "사용법: `/reopen 세션명`");
+        await sendText(chatId, "사용법: `/resume 세션명` 또는 `/reopen 세션명`");
         return;
       }
       await mutateState(() => {
@@ -369,6 +386,7 @@ async function handleCommand(chatId, chat, message, text) {
       await sendText(chatId, `세션 \`${label}\` 을 다시 열고 활성 세션으로 지정했습니다.`);
       return;
     }
+    case "/cwd":
     case "/where": {
       const session = getActiveSession(chat);
       if (!session) {
@@ -724,15 +742,53 @@ async function handlePendingNewSessionInput(chatId, chat, text) {
   return true;
 }
 
-async function processSessionPrompt(chatId, label, prompt) {
+async function processSessionPrompt(chatId, label, prompt, progressMessageId = null) {
   const chat = ensureChat(chatId);
   const session = chat.sessions[label];
   if (!session) {
     return;
   }
 
+  const progressState = {
+    threadId: session.threadId ?? "",
+    statusText: "실행 중",
+    steps: ["Codex 응답 대기 중"],
+  };
+  let lastProgressText = "";
+  let progressChain = Promise.resolve();
+  const maxProgressSteps = 10;
+
+  function queueProgress(step, overrides = {}) {
+    if (overrides.threadId) {
+      progressState.threadId = overrides.threadId;
+    }
+    if (overrides.statusText) {
+      progressState.statusText = overrides.statusText;
+    }
+    if (step && progressState.steps.at(-1) !== step) {
+      progressState.steps.push(step);
+      if (progressState.steps.length > maxProgressSteps) {
+        progressState.steps = progressState.steps.slice(-maxProgressSteps);
+      }
+    }
+    if (!progressMessageId) {
+      return;
+    }
+    const nextText = renderProgress(label, progressState);
+    if (nextText === lastProgressText) {
+      return;
+    }
+    lastProgressText = nextText;
+    progressChain = progressChain
+      .then(() => editText(chatId, progressMessageId, nextText, { parse_mode: "MarkdownV2" }))
+      .catch((error) => {
+        console.warn(`[progress] ${error?.message || error}`);
+      });
+  }
+
   try {
-    const result = await runCodexSession(chatId, label, session, prompt);
+    queueProgress("요청 분석 중");
+    const result = await runCodexSession(chatId, label, session, prompt, queueProgress);
     const threadId = await mutateState(() => {
       const latestChat = ensureChat(chatId);
       const latestSession = latestChat.sessions[label];
@@ -745,7 +801,19 @@ async function processSessionPrompt(chatId, label, prompt) {
       latestSession.lastAssistantMessage = result.text;
       return latestSession.threadId;
     });
-    await sendText(chatId, renderReply(label, result.text, threadId));
+    queueProgress("응답 전달 완료", {
+      threadId,
+      statusText: "완료",
+    });
+    await progressChain;
+    await sendText(
+      chatId,
+      renderReply(label, result.text, threadId, {
+        branch: session.worktree?.branch ?? "",
+        usage: result.usage ?? null,
+      }),
+      { parse_mode: "MarkdownV2" },
+    );
   } catch (error) {
     await mutateState(() => {
       const latestChat = ensureChat(chatId);
@@ -757,11 +825,21 @@ async function processSessionPrompt(chatId, label, prompt) {
       latestSession.updatedAt = now();
     });
     if (error instanceof SessionCanceledError) {
-      await sendText(chatId, `세션 "${label}" 실행을 취소했습니다.`);
+      queueProgress("사용자 취소 요청 반영", { statusText: "취소됨" });
+      await progressChain;
+      await sendText(chatId, renderError(label, '실행을 취소했습니다.'), {
+        parse_mode: "MarkdownV2",
+      });
       return;
     }
+    queueProgress("실행 중 오류 발생", { statusText: "실패" });
+    await progressChain;
     logError(`session-run:${label}`, error);
-    await sendText(chatId, toUserMessage(error, `세션 \`${label}\` 실행 중 오류가 발생했습니다.`));
+    await sendText(
+      chatId,
+      renderError(label, toUserMessage(error, `세션 \`${label}\` 실행 중 오류가 발생했습니다.`)),
+      { parse_mode: "MarkdownV2" },
+    );
   }
 }
 
@@ -842,123 +920,113 @@ async function buildRecentSessionDetail(chat, sessionId) {
   ].join("\n");
 }
 
-async function runCodexSession(chatId, label, session, prompt) {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-telegram-"));
-  const outputPath = path.join(tempDir, "output.txt");
-  const args = buildCodexArgs(session, prompt, outputPath);
-  const child = spawn("codex", args, {
-    cwd: session.cwd,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: buildCodexChildEnv(),
-  });
+async function runCodexSession(chatId, label, session, prompt, onProgress = () => {}) {
   const runtimeKey = sessionRuntimeKey(chatId, label);
+  const abortController = new AbortController();
   runningSessionProcesses.set(runtimeKey, {
-    child,
     cancelRequested: false,
+    abortController,
   });
 
-  let threadId = session.threadId;
-  let lastAgentMessage = "";
-  let stderr = "";
-
-  const stdoutRl = readline.createInterface({ input: child.stdout });
-  stdoutRl.on("line", (line) => {
-    try {
-      const event = JSON.parse(line);
-      if (event.type === "thread.started" && event.thread_id) {
-        threadId = event.thread_id;
-      }
-      if (
-        event.type === "item.completed" &&
-        event.item?.type === "agent_message" &&
-        typeof event.item.text === "string"
-      ) {
-        lastAgentMessage = event.item.text;
-      }
-    } catch {
-      // Ignore non-JSON lines from the CLI.
-    }
-  });
-
-  child.stderr.on("data", (chunk) => {
-    stderr += String(chunk);
-  });
-
-  const exitCode = await new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", resolve);
-  });
-  const runtime = runningSessionProcesses.get(runtimeKey);
-  runningSessionProcesses.delete(runtimeKey);
-
-  stdoutRl.close();
-
-  let finalText = "";
   try {
-    finalText = (await fs.readFile(outputPath, "utf8")).trim();
-  } catch {
-    finalText = lastAgentMessage.trim();
+    const result = await runCodexSdkTurn(session, prompt, {
+      signal: abortController.signal,
+      model: CODEX_MODEL,
+      fullAuto: CODEX_FULL_AUTO,
+      skipGitRepoCheck: CODEX_SKIP_GIT_REPO_CHECK,
+      onEvent(event) {
+        if (event.type === "thread.started" && event.thread_id) {
+          onProgress("세션 연결 완료", { threadId: event.thread_id });
+          return;
+        }
+        if (event.type === "turn.started") {
+          onProgress("요청 분석 중");
+          return;
+        }
+        if (event.type === "item.started" && event.item?.type === "command_execution") {
+          onProgress(`명령 실행 중: ${summarizeCommandForProgress(event.item.command)}`);
+          return;
+        }
+        if (event.type === "item.completed" && event.item?.type === "command_execution") {
+          const commandText = summarizeCommandForProgress(event.item.command);
+          const exitText = typeof event.item.exit_code === "number" ? ` (exit ${event.item.exit_code})` : "";
+          onProgress(`명령 완료: ${commandText}${exitText}`);
+          return;
+        }
+        if (event.type === "item.completed" && event.item?.type === "reasoning") {
+          onProgress("해결 방향 정리 중");
+          return;
+        }
+        if (
+          event.type === "item.completed" &&
+          event.item?.type === "agent_message" &&
+          typeof event.item.text === "string"
+        ) {
+          onProgress("응답 정리 중");
+          return;
+        }
+        if (event.type === "item.completed" && event.item?.type === "file_change") {
+          const changed = event.item.changes?.map((change) => change.path).filter(Boolean) ?? [];
+          const summary = changed.length > 0 ? changed.slice(0, 2).join(", ") : "파일 변경";
+          onProgress(`파일 반영: ${summary}`);
+          return;
+        }
+        if (event.type === "item.completed" && event.item?.type === "mcp_tool_call") {
+          onProgress(`도구 완료: ${event.item.server}/${event.item.tool}`);
+          return;
+        }
+        if (event.type === "item.completed" && event.item?.type === "web_search") {
+          onProgress(`검색 완료: ${event.item.query}`);
+          return;
+        }
+        if (event.type === "item.completed" && event.item?.type === "todo_list") {
+          onProgress("계획 업데이트");
+          return;
+        }
+        if (event.type === "turn.completed") {
+          onProgress("응답 마무리 중");
+        }
+      },
+    });
+
+    if (!result.threadId) {
+      throw new UserVisibleError("Codex thread_id를 추출하지 못했습니다.");
+    }
+
+    return {
+      threadId: result.threadId,
+      text: result.text || "(빈 응답)",
+      usage: result.usage ?? null,
+    };
+  } catch (error) {
+    const runtime = runningSessionProcesses.get(runtimeKey);
+    if (runtime?.cancelRequested || error?.name === "AbortError") {
+      throw new SessionCanceledError();
+    }
+    throw error;
   } finally {
-    await fs.rm(tempDir, { recursive: true, force: true });
+    runningSessionProcesses.delete(runtimeKey);
   }
-
-  if (runtime?.cancelRequested) {
-    throw new SessionCanceledError();
-  }
-
-  if (exitCode !== 0) {
-    throw new Error((stderr || finalText || `exit code ${exitCode}`).trim());
-  }
-
-  if (!threadId) {
-    throw new UserVisibleError("Codex thread_id를 추출하지 못했습니다.");
-  }
-
-  if (!finalText) {
-    finalText = "(빈 응답)";
-  }
-
-  return {
-    threadId,
-    text: finalText,
-  };
 }
 
-function buildCodexArgs(session, prompt, outputPath) {
-  const shared = [];
-  if (CODEX_MODEL) {
-    shared.push("-m", CODEX_MODEL);
-  }
-  if (CODEX_FULL_AUTO) {
-    shared.push("--full-auto");
-  }
-  if (CODEX_SKIP_GIT_REPO_CHECK) {
-    shared.push("--skip-git-repo-check");
+function summarizeCommandForProgress(command) {
+  if (!command) {
+    return "명령";
   }
 
-  if (session.threadId) {
-    return [
-      "exec",
-      "resume",
-      "--json",
-      ...shared,
-      "-o",
-      outputPath,
-      session.threadId,
-      prompt,
-    ];
+  const rawCommand = Array.isArray(command) ? command.join(" ") : String(command);
+  let summary = rawCommand.replace(/\s+/g, " ").trim();
+  if (summary.startsWith("/bin/bash -lc ")) {
+    summary = summary.slice("/bin/bash -lc ".length);
+  }
+  if (
+    (summary.startsWith("\"") && summary.endsWith("\"")) ||
+    (summary.startsWith("'") && summary.endsWith("'"))
+  ) {
+    summary = summary.slice(1, -1);
   }
 
-  return [
-    "exec",
-    "--json",
-    ...shared,
-    "-C",
-    session.cwd,
-    "-o",
-    outputPath,
-    prompt,
-  ];
+  return summary.length > 100 ? `${summary.slice(0, 97)}...` : summary;
 }
 
 async function sendMainMenu(chatId) {
@@ -1074,18 +1142,12 @@ async function cancelSession(chatId, chat, label) {
   }
 
   const runtime = runningSessionProcesses.get(sessionRuntimeKey(chatId, label));
-  if (!runtime?.child) {
+  if (!runtime?.abortController) {
     return `세션 "${label}" 실행 상태를 찾지 못했습니다. 잠시 후 다시 확인해주세요.`;
   }
 
   runtime.cancelRequested = true;
-  runtime.child.kill("SIGINT");
-  setTimeout(() => {
-    const latest = runningSessionProcesses.get(sessionRuntimeKey(chatId, label));
-    if (latest?.child === runtime.child) {
-      latest.child.kill("SIGTERM");
-    }
-  }, 2000).unref();
+  runtime.abortController.abort();
 
   return `세션 "${label}" 실행 취소를 요청했습니다.`;
 }
@@ -1124,13 +1186,6 @@ function collectRegisteredWorktreePaths() {
 
 function sessionRuntimeKey(chatId, label) {
   return `${chatId}::${label}`;
-}
-
-class SessionCanceledError extends Error {
-  constructor() {
-    super("session canceled");
-    this.name = "SessionCanceledError";
-  }
 }
 
 async function mutateState(mutator) {
