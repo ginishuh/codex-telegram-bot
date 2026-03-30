@@ -35,13 +35,21 @@ test("createTelegramClient sends JSON POST requests and returns result", async (
       chat_id: 123,
       text: "hello",
     });
+    const sent = await client.sendText(123, "progress");
 
     assert.deepEqual(result, { delivered: true });
-    assert.equal(requests.length, 1);
+    assert.deepEqual(sent, { delivered: true });
+    assert.equal(requests.length, 2);
     assert.equal(requests[0].method, "POST");
     assert.equal(requests[0].url, "/sendMessage");
     assert.equal(requests[0].headers["content-type"], "application/json");
     assert.deepEqual(requests[0].body, { chat_id: 123, text: "hello" });
+    assert.deepEqual(requests[1].body, {
+      chat_id: 123,
+      text: "progress",
+      disable_web_page_preview: true,
+      parse_mode: "MarkdownV2",
+    });
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => {

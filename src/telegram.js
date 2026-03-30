@@ -42,6 +42,13 @@ async function postJson(requestUrl, payload) {
   });
 }
 
+function withDefaultParseMode(extra = {}) {
+  return {
+    parse_mode: "MarkdownV2",
+    ...extra,
+  };
+}
+
 export function createTelegramClient(apiBaseUrl) {
   async function telegram(method, payload) {
     let lastError = null;
@@ -75,14 +82,16 @@ export function createTelegramClient(apiBaseUrl) {
 
   async function sendText(chatId, text, extra = {}) {
     const chunks = splitTelegramText(text);
+    let lastResult = null;
     for (const [index, chunk] of chunks.entries()) {
-      await telegram("sendMessage", {
+      lastResult = await telegram("sendMessage", {
         chat_id: Number(chatId),
         text: chunk,
         disable_web_page_preview: true,
-        ...(index === chunks.length - 1 ? extra : {}),
+        ...(index === chunks.length - 1 ? withDefaultParseMode(extra) : withDefaultParseMode()),
       });
     }
+    return lastResult;
   }
 
   async function editText(chatId, messageId, text, extra = {}) {
@@ -91,7 +100,7 @@ export function createTelegramClient(apiBaseUrl) {
       message_id: messageId,
       text,
       disable_web_page_preview: true,
-      ...extra,
+      ...withDefaultParseMode(extra),
     });
   }
 
