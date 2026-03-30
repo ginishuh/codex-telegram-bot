@@ -194,6 +194,7 @@ async function handleUpdate(update) {
       statusText: "시작됨",
       steps: ["요청 전달 완료", "Codex 준비 중"],
     }),
+    { parse_mode: "MarkdownV2" },
   );
 
   const job = processSessionPrompt(chatId, activeLabel, text, progressMessage?.message_id ?? null).finally(
@@ -775,7 +776,7 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
     }
     lastProgressText = nextText;
     progressChain = progressChain
-      .then(() => editText(chatId, progressMessageId, nextText))
+      .then(() => editText(chatId, progressMessageId, nextText, { parse_mode: "MarkdownV2" }))
       .catch(() => {});
   }
 
@@ -799,7 +800,14 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
       statusText: "완료",
     });
     await progressChain;
-    await sendText(chatId, renderReply(label, result.text, threadId));
+    await sendText(
+      chatId,
+      renderReply(label, result.text, threadId, {
+        branch: session.worktree?.branch ?? "",
+        usage: result.usage ?? null,
+      }),
+      { parse_mode: "MarkdownV2" },
+    );
   } catch (error) {
     await mutateState(() => {
       const latestChat = ensureChat(chatId);
@@ -813,7 +821,9 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
     if (error instanceof SessionCanceledError) {
       queueProgress("사용자 취소 요청 반영", { statusText: "취소됨" });
       await progressChain;
-      await sendText(chatId, renderError(label, '실행을 취소했습니다.'));
+      await sendText(chatId, renderError(label, '실행을 취소했습니다.'), {
+        parse_mode: "MarkdownV2",
+      });
       return;
     }
     queueProgress("실행 중 오류 발생", { statusText: "실패" });
@@ -822,6 +832,7 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
     await sendText(
       chatId,
       renderError(label, toUserMessage(error, `세션 \`${label}\` 실행 중 오류가 발생했습니다.`)),
+      { parse_mode: "MarkdownV2" },
     );
   }
 }
@@ -979,6 +990,7 @@ async function runCodexSession(chatId, label, session, prompt, onProgress = () =
     return {
       threadId: result.threadId,
       text: result.text || "(빈 응답)",
+      usage: result.usage ?? null,
     };
   } catch (error) {
     const runtime = runningSessionProcesses.get(runtimeKey);

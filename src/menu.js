@@ -229,14 +229,47 @@ export function formatRecentMenuText(entries, page) {
   return lines.join("\n");
 }
 
-export function renderReply(label, text, threadId) {
+function formatUsage(usage) {
+  if (!usage) {
+    return null;
+  }
+
+  const formatTokenCount = (value) => {
+    if (value < 1000) {
+      return String(value);
+    }
+
+    const compact = (value / 1000).toFixed(value >= 10000 ? 0 : 1);
+    return `${compact.replace(/\.0$/, "")}k`;
+  };
+
+  const parts = [`in ${formatTokenCount(usage.input_tokens)}`];
+  if (usage.cached_input_tokens) {
+    parts.push(`cached ${formatTokenCount(usage.cached_input_tokens)}`);
+  }
+  parts.push(`out ${formatTokenCount(usage.output_tokens)}`);
+  return parts.join(" | ");
+}
+
+export function renderReply(label, text, threadId, { branch = "", usage = null } = {}) {
   const body = escapeTelegramMarkdown(text);
+  const footer = [`*thread* ${code(threadId)}`];
+
+  if (branch) {
+    footer.push(`*branch* ${code(branch)}`);
+  }
+
+  const usageText = formatUsage(usage);
+  if (usageText) {
+    footer.push(`*usage* ${escapeTelegramMarkdown(usageText)}`);
+  }
+
   return [
     `*\\[${escapeTelegramMarkdown(label)}\\] 결과*`,
     "",
     body,
     "",
-    `*thread* ${code(threadId)}`,
+    footer.join("\n"),
   ].join("\n");
 }
 

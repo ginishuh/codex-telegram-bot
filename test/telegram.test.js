@@ -48,7 +48,6 @@ test("createTelegramClient sends JSON POST requests and returns result", async (
       chat_id: 123,
       text: "progress",
       disable_web_page_preview: true,
-      parse_mode: "MarkdownV2",
     });
   } finally {
     await new Promise((resolve, reject) => {

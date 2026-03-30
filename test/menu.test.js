@@ -34,11 +34,20 @@ test("helpText separates codex core and telegram extras", () => {
 });
 
 test("renderReply and renderError escape telegram markdown safely", () => {
-  const reply = renderReply("bug_fix", "path: /tmp/a-b (ok)", "thr_123");
+  const reply = renderReply("bug_fix", "path: /tmp/a-b (ok)", "thr_123", {
+    branch: "bot/50492701/511-20260329214558",
+    usage: {
+      input_tokens: 28323,
+      cached_input_tokens: 3456,
+      output_tokens: 30,
+    },
+  });
   const error = renderError("bug_fix", "failed: a_b-c");
 
   assert.match(reply, /\*\\\[bug\\_fix\\\] 결과\*/);
   assert.match(reply, /`thr\\_123`/);
+  assert.match(reply, /\*branch\* `bot\/50492701\/511\\-20260329214558`/);
+  assert.match(reply, /\*usage\* in 28\\.3k \\| cached 3\\.5k \\| out 30/);
   assert.match(reply, /path: \/tmp\/a\\-b \\\(ok\\\)/);
   assert.match(error, /\*\\\[bug\\_fix\\\] 오류\*/);
   assert.match(error, /failed: a\\_b\\-c/);
