@@ -3,12 +3,17 @@ import { Codex } from "@openai/codex-sdk";
 import { buildCodexChildEnv } from "./child-env.js";
 
 let codexClient = null;
+let codexClientEnvKey = "";
 
 function getCodexClient() {
-  if (!codexClient) {
+  const env = buildCodexChildEnv();
+  const envKey = JSON.stringify(env);
+
+  if (!codexClient || codexClientEnvKey !== envKey) {
     codexClient = new Codex({
-      env: buildCodexChildEnv(),
+      env,
     });
+    codexClientEnvKey = envKey;
   }
 
   return codexClient;

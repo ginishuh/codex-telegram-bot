@@ -756,6 +756,7 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
   };
   let lastProgressText = "";
   let progressChain = Promise.resolve();
+  const maxProgressSteps = 10;
 
   function queueProgress(step, overrides = {}) {
     if (overrides.threadId) {
@@ -766,6 +767,9 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
     }
     if (step && progressState.steps.at(-1) !== step) {
       progressState.steps.push(step);
+      if (progressState.steps.length > maxProgressSteps) {
+        progressState.steps = progressState.steps.slice(-maxProgressSteps);
+      }
     }
     if (!progressMessageId) {
       return;
@@ -777,7 +781,9 @@ async function processSessionPrompt(chatId, label, prompt, progressMessageId = n
     lastProgressText = nextText;
     progressChain = progressChain
       .then(() => editText(chatId, progressMessageId, nextText, { parse_mode: "MarkdownV2" }))
-      .catch(() => {});
+      .catch((error) => {
+        console.warn(`[progress] ${error?.message || error}`);
+      });
   }
 
   try {
@@ -1008,7 +1014,8 @@ function summarizeCommandForProgress(command) {
     return "명령";
   }
 
-  let summary = String(command).replace(/\s+/g, " ").trim();
+  const rawCommand = Array.isArray(command) ? command.join(" ") : String(command);
+  let summary = rawCommand.replace(/\s+/g, " ").trim();
   if (summary.startsWith("/bin/bash -lc ")) {
     summary = summary.slice("/bin/bash -lc ".length);
   }

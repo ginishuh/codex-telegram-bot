@@ -4,6 +4,8 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { splitTelegramText } from "./lib/utils.js";
 
+const TELEGRAM_REQUEST_TIMEOUT_MS = 30_000;
+
 async function postJson(requestUrl, payload) {
   const url = new URL(requestUrl);
   const transport = url.protocol === "https:" ? https : http;
@@ -18,7 +20,7 @@ async function postJson(requestUrl, payload) {
           "content-type": "application/json",
           "content-length": Buffer.byteLength(body),
         },
-        family: url.protocol === "https:" ? 4 : undefined,
+        family: 4,
       },
       (response) => {
         let raw = "";
@@ -36,6 +38,9 @@ async function postJson(requestUrl, payload) {
       },
     );
 
+    request.setTimeout(TELEGRAM_REQUEST_TIMEOUT_MS, () => {
+      request.destroy(new Error(`telegram request timed out after ${TELEGRAM_REQUEST_TIMEOUT_MS}ms`));
+    });
     request.on("error", reject);
     request.write(body);
     request.end();

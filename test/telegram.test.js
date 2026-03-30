@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import test from "node:test";
 
@@ -59,5 +60,56 @@ test("createTelegramClient sends JSON POST requests and returns result", async (
         resolve();
       });
     });
+  }
+});
+
+test("createTelegramClient forces IPv4 and applies request timeout", async () => {
+  const originalRequest = http.request;
+  const captured = {
+    options: null,
+    timeoutMs: null,
+    body: "",
+  };
+
+  http.request = (url, options, callback) => {
+    captured.options = options;
+
+    const response = new EventEmitter();
+    response.setEncoding = () => {};
+
+    const request = new EventEmitter();
+    request.setTimeout = (timeoutMs, handler) => {
+      captured.timeoutMs = timeoutMs;
+      request.timeoutHandler = handler;
+      return request;
+    };
+    request.write = (chunk) => {
+      captured.body += chunk;
+    };
+    request.end = () => {
+      callback(response);
+      response.emit("data", JSON.stringify({ ok: true, result: { delivered: true } }));
+      response.emit("end");
+    };
+    request.destroy = () => {};
+    return request;
+  };
+
+  try {
+    const client = createTelegramClient("http://127.0.0.1:9999");
+    const result = await client.telegram("sendMessage", {
+      chat_id: 321,
+      text: "hello",
+    });
+
+    assert.deepEqual(result, { delivered: true });
+    assert.equal(captured.options.family, 4);
+    assert.equal(captured.timeoutMs, 30_000);
+    assert.deepEqual(JSON.parse(captured.body), {
+      chat_id: 321,
+      text: "hello",
+    });
+  } finally {
+    http.request = originalRequest;
   }
 });
